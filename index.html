@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Explore and visualize WMTS layers on an interactive map." />
+    <title>WMTS Explorer</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header class="app-header">
+          <h1>WMTS Explorer</h1>
+          <p class="hint">Visualize layers from any OGC Web Map Tile Service.</p>
+        </header>
+
+        <section class="panel">
+          <form id="service-form">
+            <label class="field">
+              <span>Capabilities URL or service endpoint</span>
+              <input id="cap-url" type="url" required placeholder="https://example.com/wmts/1.0.0/WMTSCapabilities.xml" />
+            </label>
+            <details>
+              <summary>Advanced</summary>
+              <label class="field">
+                <span>Extra query parameters</span>
+                <input id="extra-params" type="text" placeholder="apikey=...&amp;foo=bar" autocomplete="off" />
+              </label>
+              <p class="hint small">Added to the capabilities and every tile request, e.g. for API keys. Not stored in the page URL.</p>
+            </details>
+            <div class="row">
+              <button id="load-btn" type="submit">Load service</button>
+              <select id="examples" aria-label="Example services">
+                <option value="">Try an example…</option>
+              </select>
+            </div>
+          </form>
+          <p id="status" class="status" role="status" hidden></p>
+        </section>
+
+        <section id="service-info" class="panel" hidden></section>
+
+        <section class="panel">
+          <h2>Map layers</h2>
+          <div id="active-layers"></div>
+        </section>
+
+        <section id="catalog" class="panel" hidden>
+          <h2>Available layers <small id="layer-count"></small></h2>
+          <input id="layer-filter" type="search" placeholder="Filter by title or identifier" />
+          <label class="check small">
+            <input id="only-compatible" type="checkbox" checked /> Only show layers that can be displayed (Web Mercator)
+          </label>
+          <ul id="layer-list"></ul>
+        </section>
+
+        <section class="panel">
+          <h2>Base map</h2>
+          <div class="row">
+            <select id="basemap" aria-label="Base map">
+              <option value="osm">OpenStreetMap</option>
+              <option value="none">None</option>
+            </select>
+            <label class="check"><input id="globe" type="checkbox" /> Globe view</label>
+          </div>
+        </section>
+      </aside>
+      <main id="map"></main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
