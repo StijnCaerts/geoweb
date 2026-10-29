@@ -383,6 +383,45 @@ details p {
   overflow-x: auto;
 }
 
+.perf-table {
+  overflow-x: auto;
+}
+
+.perf-table table {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  width: 100%;
+}
+
+.perf-table th,
+.perf-table td {
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.perf-table th:first-child,
+.perf-table td:first-child {
+  text-align: left;
+}
+
+.perf-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.perf-table tr.group th {
+  text-align: left;
+  color: var(--text);
+  background: #f1f4f8;
+}
+
+.perf-table tr.has-errors td:nth-child(3) {
+  color: var(--error);
+  font-weight: 600;
+}
+
 .legend img {
   max-width: 100%;
   background: #fff;

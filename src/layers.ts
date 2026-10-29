@@ -2,6 +2,7 @@ import { addProtocol, type LngLatBoundsLike, type Map as MlMap, type RasterTileS
 import { expandDimension, type DimensionDomain } from './dimensions';
 import { el, escapeHtml, safeHttpUrl, select } from './dom';
 import { compatibleMatrixSets, type WmtsCapabilities, type WmtsDimension, type WmtsLayer } from './wmts';
+import type { TileMonitor } from './perf';
 
 const MAX_LAT = 85.051129;
 const PLAY_INTERVAL_MS = 1500;
@@ -68,6 +69,7 @@ export class LayerManager {
   constructor(
     private map: MlMap,
     private container: HTMLElement,
+    private monitor?: TileMonitor,
   ) {
     // Tiles are requested as wmts://<id>/<rev>/<z>/<x>/<y> and translated to the real WMTS
     // request here, which lets us map XYZ zoom levels onto arbitrary TileMatrix identifiers.
@@ -76,9 +78,18 @@ export class LayerManager {
       const a = this.layers.get(id);
       const url = a && this.tileUrl(a, Number(z), Number(x), Number(y));
       if (!url) throw Object.assign(new Error(`Tile ${z}/${x}/${y} is outside the layer's tile range`), { name: 'AbortError' });
-      const res = await fetch(url, { signal: abort.signal });
+      const start = performance.now();
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: abort.signal });
+      } catch (e) {
+        if ((e as Error).name !== 'AbortError') this.recordTile(a, Number(z), start, NaN, 0, 0);
+        throw e;
+      }
+      const ttfb = performance.now() - start;
       if (!res.ok) {
         const status = res.status;
+        this.recordTile(a, Number(z), start, ttfb, 0, status);
         if (a.encoding === 'REST' && !a.loaded && a.caps.kvpUrl && status >= 400 && status < 500 && status !== 404) {
           this.fallBackToKvp(a, status);
         }
@@ -87,7 +98,9 @@ export class LayerManager {
         throw new Error(`HTTP ${status} for ${url}`);
       }
       a.loaded = true;
-      return { data: await res.arrayBuffer() };
+      const data = await res.arrayBuffer();
+      this.recordTile(a, Number(z), start, ttfb, data.byteLength, res.status);
+      return { data };
     });
 
     map.on('error', (e) => {
@@ -106,6 +119,21 @@ export class LayerManager {
     });
 
     this.render();
+  }
+
+  private recordTile(a: ActiveLayer, z: number, start: number, ttfb: number, bytes: number, status: number): void {
+    if (!this.monitor?.enabled) return;
+    this.monitor.record({
+      layerKey: a.id,
+      layerTitle: a.layer.title,
+      tileMatrixSet: a.tms,
+      tileMatrix: a.caps.tileMatrixSets.get(a.tms)?.webMercator?.zoomToMatrix.get(z) ?? String(z),
+      zoom: z,
+      ttfb,
+      duration: performance.now() - start,
+      bytes,
+      status,
+    });
   }
 
   add(caps: WmtsCapabilities, layer: WmtsLayer): void {

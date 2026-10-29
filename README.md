@@ -13,6 +13,7 @@ A static web application to explore and visualize [OGC WMTS](https://www.ogc.org
 - Optional extra query parameters (e.g. API keys) for capabilities and tile requests.
 - Shareable links: `?url=<capabilities url>` loads a service on startup.
 - Save services (including extra parameters) in the browser's local storage for quick access later.
+- Optional tile request monitoring: request counts, errors, latency percentiles and tile sizes, aggregated per tile matrix set and zoom level.
 
 ## Limitations
 

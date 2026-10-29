@@ -5,6 +5,7 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import { BASEMAPS } from './basemaps';
 import { el, safeHttpUrl } from './dom';
 import { LAYER_PREFIX, LayerManager, SOURCE_PREFIX } from './layers';
+import { mountMonitorPanel, TileMonitor } from './perf';
 import { loadSavedServices, storeSavedServices, type SavedService } from './saved';
 import { buildCapabilitiesUrl, compatibleMatrixSets, parseCapabilities, type WmtsCapabilities, type WmtsLayer } from './wmts';
 
@@ -54,7 +55,9 @@ map.addControl(new maplibregl.NavigationControl(), 'top-right');
 map.addControl(new maplibregl.ScaleControl(), 'bottom-left');
 /** Resolves when the current style can be modified; replaced on every basemap switch. */
 let mapReady = new Promise<void>((resolve) => map.once('load', () => resolve()));
-const layers = new LayerManager(map, $('active-layers'));
+const monitor = new TileMonitor();
+const layers = new LayerManager(map, $('active-layers'), monitor);
+mountMonitorPanel($<HTMLInputElement>('perf-toggle'), $('perf-body'), monitor);
 
 const basemapSelect = $<HTMLSelectElement>('basemap');
 const globe = $<HTMLInputElement>('globe');
