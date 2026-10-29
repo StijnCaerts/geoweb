@@ -18,6 +18,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -167,6 +171,61 @@ button.link {
 button.link:hover:not(:disabled) {
   background: none;
   text-decoration: underline;
+}
+
+button.secondary {
+  background: #fff;
+  color: var(--accent);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #eef2f7;
+}
+
+h3 {
+  font-size: 0.9rem;
+  margin: 14px 0 4px;
+}
+
+.save-form {
+  margin-top: 8px;
+  flex-wrap: nowrap;
+}
+
+.save-form input {
+  flex: 1;
+}
+
+#saved-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.saved-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.saved-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  color: var(--text);
+}
+
+.saved-name small {
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 details summary {

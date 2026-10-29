@@ -5,6 +5,7 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import { BASEMAPS } from './basemaps';
 import { el, safeHttpUrl } from './dom';
 import { LAYER_PREFIX, LayerManager, SOURCE_PREFIX } from './layers';
+import { loadSavedServices, storeSavedServices, type SavedService } from './saved';
 import { buildCapabilitiesUrl, compatibleMatrixSets, parseCapabilities, type WmtsCapabilities, type WmtsLayer } from './wmts';
 
 const EXAMPLES = [
@@ -34,6 +35,11 @@ const layerCount = $<HTMLElement>('layer-count');
 const filterInput = $<HTMLInputElement>('layer-filter');
 const onlyCompatible = $<HTMLInputElement>('only-compatible');
 const layerList = $<HTMLUListElement>('layer-list');
+const saveBtn = $<HTMLButtonElement>('save-btn');
+const saveForm = $<HTMLFormElement>('save-form');
+const saveName = $<HTMLInputElement>('save-name');
+const savedSection = $<HTMLElement>('saved');
+const savedList = $<HTMLUListElement>('saved-list');
 
 // MapLibre resolves its worker next to its own module, which does not survive bundling.
 maplibregl.setWorkerUrl(workerUrl);
@@ -231,6 +237,101 @@ form.addEventListener('submit', (e) => {
   e.preventDefault();
   void loadService(urlInput.value, extraInput.value);
 });
+
+let savedServices = loadSavedServices();
+
+function persistSaved(next: SavedService[]): boolean {
+  try {
+    storeSavedServices(next);
+  } catch {
+    setStatus('Could not save: local storage is unavailable or full in this browser.', 'error');
+    return false;
+  }
+  savedServices = next;
+  renderSaved();
+  return true;
+}
+
+function renderSaved() {
+  savedSection.hidden = savedServices.length === 0;
+  savedList.replaceChildren(
+    ...savedServices.map((s, i) =>
+      el(
+        'li',
+        { class: 'saved-item' },
+        el(
+          'button',
+          {
+            type: 'button',
+            class: 'link saved-name',
+            title: s.url,
+            onclick: () => {
+              urlInput.value = s.url;
+              extraInput.value = s.params;
+              void loadService(s.url, s.params);
+            },
+          },
+          el('strong', { text: s.name }),
+          el('small', { text: s.url }),
+        ),
+        el('button', {
+          type: 'button',
+          class: 'icon',
+          text: '✕',
+          title: `Remove "${s.name}"`,
+          'aria-label': `Remove ${s.name}`,
+          onclick: (e: Event) => {
+            const btn = e.currentTarget as HTMLButtonElement;
+            // Two clicks are required to remove, as a lightweight confirmation.
+            if (btn.dataset.armed) {
+              persistSaved(savedServices.filter((_, j) => j !== i));
+              return;
+            }
+            btn.dataset.armed = 'true';
+            btn.textContent = 'Remove?';
+            setTimeout(() => {
+              delete btn.dataset.armed;
+              btn.textContent = '✕';
+            }, 3000);
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+saveBtn.addEventListener('click', () => {
+  const url = urlInput.value.trim();
+  if (!url || !urlInput.checkValidity()) {
+    setStatus('Enter a valid service URL before saving.', 'error');
+    return;
+  }
+  const existing = savedServices.find((s) => s.url === url && s.params === extraInput.value.trim());
+  const loadedTitle = caps && caps.url.startsWith(url.split('?')[0]) ? caps.title : undefined;
+  saveName.value = existing?.name ?? loadedTitle ?? new URL(url).hostname;
+  saveForm.hidden = false;
+  saveName.select();
+});
+
+$<HTMLButtonElement>('save-cancel').addEventListener('click', () => (saveForm.hidden = true));
+
+saveForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = saveName.value.trim();
+  const url = urlInput.value.trim();
+  const params = extraInput.value.trim();
+  if (!name || !url) return;
+  const existing = savedServices.find((s) => s.url === url && s.params === params);
+  const next = existing
+    ? savedServices.map((s) => (s === existing ? { ...s, name } : s))
+    : [...savedServices, { name, url, params }];
+  if (persistSaved(next)) {
+    saveForm.hidden = true;
+    setStatus(`Saved "${name}" in this browser.`, 'ok');
+  }
+});
+
+renderSaved();
 
 let filterTimer: number | undefined;
 filterInput.addEventListener('input', () => {

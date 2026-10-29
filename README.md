@@ -12,6 +12,7 @@ A static web application to explore and visualize [OGC WMTS](https://www.ogc.org
 - Basemaps: OpenStreetMap raster, [OpenFreeMap](https://openfreemap.org/) vector styles (Liberty, Bright, Positron, Dark, Fiord) or none.
 - Optional extra query parameters (e.g. API keys) for capabilities and tile requests.
 - Shareable links: `?url=<capabilities url>` loads a service on startup.
+- Save services (including extra parameters) in the browser's local storage for quick access later.
 
 ## Limitations
 
