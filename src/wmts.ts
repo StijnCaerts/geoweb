@@ -25,6 +25,13 @@ export interface WmtsResourceUrl {
   template: string;
 }
 
+export interface WmtsTileMatrixLimits {
+  minRow: number;
+  maxRow: number;
+  minCol: number;
+  maxCol: number;
+}
+
 export interface WmtsLayer {
   identifier: string;
   title: string;
@@ -34,6 +41,8 @@ export interface WmtsLayer {
   formats: string[];
   dimensions: WmtsDimension[];
   tileMatrixSets: string[];
+  /** Per tile matrix set, the tile ranges per TileMatrix identifier (when declared). */
+  tileMatrixLimits: Record<string, Map<string, WmtsTileMatrixLimits>>;
   resourceUrls: WmtsResourceUrl[];
 }
 
@@ -196,12 +205,34 @@ function parseLayer(l: Element): WmtsLayer {
     tileMatrixSets: kids(l, 'TileMatrixSetLink')
       .map((link) => txt(link, 'TileMatrixSet'))
       .filter((s): s is string => !!s),
+    tileMatrixLimits: parseLimits(l),
     resourceUrls: kids(l, 'ResourceURL').map((r) => ({
       format: r.getAttribute('format') ?? '',
       resourceType: r.getAttribute('resourceType') ?? '',
       template: r.getAttribute('template') ?? '',
     })),
   };
+}
+
+function parseLimits(l: Element): WmtsLayer['tileMatrixLimits'] {
+  const result: WmtsLayer['tileMatrixLimits'] = {};
+  for (const link of kids(l, 'TileMatrixSetLink')) {
+    const tms = txt(link, 'TileMatrixSet');
+    const limits = kids(kid(link, 'TileMatrixSetLimits'), 'TileMatrixLimits');
+    if (!tms || !limits.length) continue;
+    result[tms] = new Map(
+      limits.map((m) => [
+        txt(m, 'TileMatrix') ?? '',
+        {
+          minRow: Number(txt(m, 'MinTileRow')),
+          maxRow: Number(txt(m, 'MaxTileRow')),
+          minCol: Number(txt(m, 'MinTileCol')),
+          maxCol: Number(txt(m, 'MaxTileCol')),
+        },
+      ]),
+    );
+  }
+  return result;
 }
 
 function parseTileMatrixSet(tms: Element): WmtsTileMatrixSet {

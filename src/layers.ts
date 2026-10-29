@@ -24,6 +24,9 @@ interface ActiveLayer {
   rev: number;
   timers: Set<number>;
   errors: number;
+  /** True once a tile loaded successfully with the current settings. */
+  loaded: boolean;
+  notice?: string;
   card?: HTMLElement;
   errorEl?: HTMLElement;
 }
@@ -67,12 +70,21 @@ export class LayerManager {
     // Tiles are requested as wmts://<id>/<rev>/<z>/<x>/<y> and translated to the real WMTS
     // request here, which lets us map XYZ zoom levels onto arbitrary TileMatrix identifiers.
     addProtocol('wmts', async (params, abort) => {
-      const [id, , z, x, y] = params.url.slice('wmts://'.length).split('/');
+      const [id, rev, z, x, y] = params.url.slice('wmts://'.length).split('/');
       const a = this.layers.get(id);
       const url = a && this.tileUrl(a, Number(z), Number(x), Number(y));
-      if (!url) throw new Error(`No tile matrix for zoom level ${z}`);
+      if (!url) throw Object.assign(new Error(`Tile ${z}/${x}/${y} is outside the layer's tile range`), { name: 'AbortError' });
       const res = await fetch(url, { signal: abort.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      if (!res.ok) {
+        const status = res.status;
+        if (a.encoding === 'REST' && !a.loaded && a.caps.kvpUrl && status >= 400 && status < 500 && status !== 404) {
+          this.fallBackToKvp(a, status);
+        }
+        // Failures of requests made with outdated settings are not worth reporting.
+        if (Number(rev) !== a.rev) throw Object.assign(new Error('Outdated tile request'), { name: 'AbortError' });
+        throw new Error(`HTTP ${status} for ${url}`);
+      }
+      a.loaded = true;
       return { data: await res.arrayBuffer() };
     });
 
@@ -122,6 +134,7 @@ export class LayerManager {
       rev: 0,
       timers: new Set(),
       errors: 0,
+      loaded: false,
     };
     a.format = this.formats(a)[0];
 
@@ -136,7 +149,7 @@ export class LayerManager {
       const [w, s, e, n] = bbox;
       const outside = e < view.getWest() || w > view.getEast() || n < view.getSouth() || s > view.getNorth();
       const tiny = e - w < (view.getEast() - view.getWest()) / 8;
-      if (outside || tiny) this.zoomTo(a);
+      if (outside || tiny || this.map.getZoom() < this.zoomRange(a).min) this.zoomTo(a);
     }
   }
 
@@ -152,6 +165,11 @@ export class LayerManager {
   private tileUrl(a: ActiveLayer, z: number, x: number, y: number): string | undefined {
     const matrix = a.caps.tileMatrixSets.get(a.tms)?.webMercator?.zoomToMatrix.get(z);
     if (matrix === undefined) return undefined;
+    const limits = a.layer.tileMatrixLimits[a.tms];
+    if (limits) {
+      const lim = limits.get(matrix);
+      if (!lim || y < lim.minRow || y > lim.maxRow || x < lim.minCol || x > lim.maxCol) return undefined;
+    }
     let url: URL;
 
     if (a.encoding === 'REST') {
@@ -187,7 +205,19 @@ export class LayerManager {
       for (const [k, v] of Object.entries(a.dims)) p.set(k, v);
     }
     a.caps.extraParams.forEach((v, k) => url.searchParams.set(k, v));
+    // Browsers block http requests from https pages; many servers advertise http but also serve https.
+    if (location.protocol === 'https:' && url.protocol === 'http:') url.protocol = 'https:';
     return url.href;
+  }
+
+  /** Some servers advertise RESTful templates they don't actually serve. */
+  private fallBackToKvp(a: ActiveLayer, status: number): void {
+    if (a.encoding !== 'REST') return;
+    a.encoding = 'KVP';
+    if (!this.formats(a).includes(a.format)) a.format = this.formats(a)[0];
+    a.notice = `RESTful tile requests were rejected (HTTP ${status}), switched to KVP.`;
+    this.refresh(a);
+    this.rerenderCard(a);
   }
 
   private beforeId(id: string): string | undefined {
@@ -197,6 +227,7 @@ export class LayerManager {
 
   private addToMap(a: ActiveLayer): void {
     const wm = a.caps.tileMatrixSets.get(a.tms)!.webMercator!;
+    const zoom = this.zoomRange(a);
     const { providerName, providerSite } = a.caps;
     const site = safeHttpUrl(providerSite);
     const attribution = providerName
@@ -209,8 +240,8 @@ export class LayerManager {
       type: 'raster',
       tiles: [`wmts://${a.id}/${a.rev}/{z}/{x}/{y}`],
       tileSize: wm.tileSize,
-      minzoom: wm.minZoom,
-      maxzoom: wm.maxZoom,
+      minzoom: zoom.min,
+      maxzoom: zoom.max,
       bounds: clampBbox(a.layer.bbox),
       attribution,
     });
@@ -270,13 +301,23 @@ export class LayerManager {
 
   private zoomTo(a: ActiveLayer): void {
     const bbox = clampBbox(a.layer.bbox);
-    if (bbox) this.map.fitBounds(bbox as LngLatBoundsLike, { padding: 40 });
+    if (!bbox) return;
+    const camera = this.map.cameraForBounds(bbox as LngLatBoundsLike, { padding: 40 });
+    if (camera) this.map.easeTo({ ...camera, zoom: Math.max(camera.zoom ?? 0, this.zoomRange(a).min) });
+  }
+
+  /** Zoom levels with tiles, narrowed by the layer's TileMatrixSetLimits when declared. */
+  private zoomRange(a: ActiveLayer): { min: number; max: number } {
+    const wm = a.caps.tileMatrixSets.get(a.tms)!.webMercator!;
+    const limits = a.layer.tileMatrixLimits[a.tms];
+    const zooms = [...wm.zoomToMatrix].filter(([, m]) => !limits || limits.has(m)).map(([z]) => z);
+    return zooms.length ? { min: Math.min(...zooms), max: Math.max(...zooms) } : { min: wm.minZoom, max: wm.maxZoom };
   }
 
   private sampleTileUrl(a: ActiveLayer): string | undefined {
-    const wm = a.caps.tileMatrixSets.get(a.tms)?.webMercator;
-    if (!wm) return undefined;
-    const z = Math.max(wm.minZoom, Math.min(wm.maxZoom, Math.floor(this.map.getZoom())));
+    if (!a.caps.tileMatrixSets.get(a.tms)?.webMercator) return undefined;
+    const zoom = this.zoomRange(a);
+    const z = Math.max(zoom.min, Math.min(zoom.max, Math.floor(this.map.getZoom())));
     const c = this.map.getCenter();
     const [x, y] = lngLatToTile(c.lng, c.lat, z);
     return this.tileUrl(a, z, x, y);
@@ -385,6 +426,7 @@ export class LayerManager {
               a.encoding,
               (v) => {
                 a.encoding = v as Encoding;
+                a.notice = undefined;
                 const available = this.formats(a);
                 if (!available.includes(a.format)) a.format = available[0];
                 this.refresh(a);
@@ -423,6 +465,13 @@ export class LayerManager {
           )
         : null,
       ...L.dimensions.map((d) => this.dimensionControl(a, d)),
+      L.tileMatrixLimits[a.tms]
+        ? el('p', {
+            class: 'hint small',
+            text: `Tiles available at zoom levels ${this.zoomRange(a).min}–${this.zoomRange(a).max}.`,
+          })
+        : null,
+      a.notice ? el('p', { class: 'hint small', text: a.notice }) : null,
       legendUrl ? el('div', { class: 'legend' }, el('img', { src: legendUrl, alt: `Legend for ${L.title}` })) : null,
       errorEl,
       el(
