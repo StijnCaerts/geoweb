@@ -9,6 +9,7 @@ A static web application to explore and visualize [OGC WMTS](https://www.ogc.org
 - Pick style, image format, tile matrix set and request encoding (RESTful or KVP).
 - Controls for every WMTS dimension (e.g. `Time`, `Elevation`), including ISO 8601 interval expansion (`start/end/period`), prev/next stepping, animation and free text input.
 - Legends, layer extent zoom, sample tile URL for debugging, globe view.
+- Basemaps: OpenStreetMap raster, [OpenFreeMap](https://openfreemap.org/) vector styles (Liberty, Bright, Positron, Dark, Fiord) or none.
 - Optional extra query parameters (e.g. API keys) for capabilities and tile requests.
 - Shareable links: `?url=<capabilities url>` loads a service on startup.
 

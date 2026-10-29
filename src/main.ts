@@ -2,8 +2,9 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import * as maplibregl from 'maplibre-gl';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
+import { BASEMAPS } from './basemaps';
 import { el, safeHttpUrl } from './dom';
-import { LayerManager } from './layers';
+import { LAYER_PREFIX, LayerManager, SOURCE_PREFIX } from './layers';
 import { buildCapabilitiesUrl, compatibleMatrixSets, parseCapabilities, type WmtsCapabilities, type WmtsLayer } from './wmts';
 
 const EXAMPLES = [
@@ -41,36 +42,53 @@ const map = new maplibregl.Map({
   container: 'map',
   center: [0, 20],
   zoom: 1.5,
-  style: {
-    version: 8,
-    sources: {
-      osm: {
-        type: 'raster',
-        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      },
-    },
-    layers: [
-      { id: 'background', type: 'background', paint: { 'background-color': '#dfe3e8' } },
-      { id: 'osm', type: 'raster', source: 'osm' },
-    ],
-  },
+  style: BASEMAPS[0].style,
 });
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 map.addControl(new maplibregl.ScaleControl(), 'bottom-left');
-const mapReady = new Promise<void>((resolve) => map.once('load', () => resolve()));
+/** Resolves when the current style can be modified; replaced on every basemap switch. */
+let mapReady = new Promise<void>((resolve) => map.once('load', () => resolve()));
 const layers = new LayerManager(map, $('active-layers'));
 
-$<HTMLSelectElement>('basemap').addEventListener('change', async (e) => {
+const basemapSelect = $<HTMLSelectElement>('basemap');
+const globe = $<HTMLInputElement>('globe');
+for (const group of new Set(BASEMAPS.map((b) => b.group))) {
+  basemapSelect.append(
+    el(
+      'optgroup',
+      { label: group },
+      ...BASEMAPS.filter((b) => b.group === group).map((b) => el('option', { value: b.id, text: b.label })),
+    ),
+  );
+}
+basemapSelect.value = BASEMAPS[0].id;
+
+basemapSelect.addEventListener('change', async () => {
+  const basemap = BASEMAPS.find((b) => b.id === basemapSelect.value);
+  if (!basemap) return;
   await mapReady;
-  const visible = (e.target as HTMLSelectElement).value === 'osm';
-  map.setLayoutProperty('osm', 'visibility', visible ? 'visible' : 'none');
+  mapReady = new Promise<void>((resolve) => map.once('style.load', () => resolve()));
+  map.setStyle(basemap.style, {
+    diff: false,
+    // Replacing the style drops everything, so carry the WMTS overlays and projection over.
+    transformStyle: (previous, next) => {
+      if (!previous) return next;
+      const sources = { ...next.sources };
+      for (const [id, source] of Object.entries(previous.sources)) {
+        if (id.startsWith(SOURCE_PREFIX)) sources[id] = source;
+      }
+      return {
+        ...next,
+        sources,
+        layers: [...next.layers, ...previous.layers.filter((l) => l.id.startsWith(LAYER_PREFIX))],
+        projection: { type: globe.checked ? 'globe' : 'mercator' },
+      };
+    },
+  });
 });
-$<HTMLInputElement>('globe').addEventListener('change', async (e) => {
+globe.addEventListener('change', async () => {
   await mapReady;
-  map.setProjection({ type: (e.target as HTMLInputElement).checked ? 'globe' : 'mercator' });
+  map.setProjection({ type: globe.checked ? 'globe' : 'mercator' });
 });
 
 function setStatus(message: string, kind: 'info' | 'ok' | 'error' = 'info') {

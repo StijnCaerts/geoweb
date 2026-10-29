@@ -31,8 +31,10 @@ interface ActiveLayer {
   errorEl?: HTMLElement;
 }
 
-const sourceId = (id: string) => `wmts-src-${id}`;
-const layerId = (id: string) => `wmts-lyr-${id}`;
+export const SOURCE_PREFIX = 'wmts-src-';
+export const LAYER_PREFIX = 'wmts-lyr-';
+const sourceId = (id: string) => `${SOURCE_PREFIX}${id}`;
+const layerId = (id: string) => `${LAYER_PREFIX}${id}`;
 
 function clampBbox(b: WmtsLayer['bbox']): [number, number, number, number] | undefined {
   if (!b || b[0] >= b[2] || b[1] >= b[3]) return undefined;
@@ -91,7 +93,7 @@ export class LayerManager {
     map.on('error', (e) => {
       const sid = (e as { sourceId?: string }).sourceId;
       if ((e.error as Partial<Error> | undefined)?.name === 'AbortError') return;
-      const a = sid?.startsWith('wmts-src-') ? this.layers.get(sid.slice('wmts-src-'.length)) : undefined;
+      const a = sid?.startsWith(SOURCE_PREFIX) ? this.layers.get(sid.slice(SOURCE_PREFIX.length)) : undefined;
       if (!a) {
         console.error(e.error);
         return;
