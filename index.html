@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Explore and visualize WMTS layers on an interactive map." />
+    <meta name="description" content="Explore and visualize WMTS and OGC API – Tiles layers on an interactive map." />
     <title>WMTS Explorer</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>
@@ -12,13 +12,13 @@
       <aside id="sidebar">
         <header class="app-header">
           <h1>WMTS Explorer</h1>
-          <p class="hint">Visualize layers from any OGC Web Map Tile Service.</p>
+          <p class="hint">Visualize layers from any OGC Web Map Tile Service or OGC API – Tiles.</p>
         </header>
 
         <section class="panel">
           <form id="service-form">
             <label class="field">
-              <span>Capabilities URL or service endpoint</span>
+              <span>WMTS capabilities URL, WMTS endpoint or OGC API landing page</span>
               <input id="cap-url" type="url" required placeholder="https://example.com/wmts/1.0.0/WMTSCapabilities.xml" />
             </label>
             <details>
@@ -27,7 +27,7 @@
                 <span>Extra query parameters</span>
                 <input id="extra-params" type="text" placeholder="apikey=...&amp;foo=bar" autocomplete="off" />
               </label>
-              <p class="hint small">Added to the capabilities and every tile request, e.g. for API keys. Not stored in the page URL, but included when you save the service in this browser.</p>
+              <p class="hint small">Added to every metadata and tile request, e.g. for API keys. Not stored in the page URL, but included when you save the service in this browser.</p>
             </details>
             <div class="row">
               <button id="load-btn" type="submit">Load service</button>

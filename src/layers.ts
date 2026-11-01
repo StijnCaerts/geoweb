@@ -1,11 +1,25 @@
-import { addProtocol, type LngLatBoundsLike, type Map as MlMap, type RasterTileSource } from 'maplibre-gl';
+import {
+  addProtocol,
+  type FilterSpecification,
+  type LayerSpecification,
+  type LngLatBoundsLike,
+  type Map as MlMap,
+  type RasterTileSource,
+  type VectorTileSource,
+} from 'maplibre-gl';
 import { expandDimension, type DimensionDomain } from './dimensions';
 import { el, escapeHtml, safeHttpUrl, select } from './dom';
+import { upgradeToPageProtocol } from './http';
+import { gunzipIfNeeded, mvtLayerNames } from './mvt';
 import { compatibleMatrixSets, type WmtsCapabilities, type WmtsDimension, type WmtsLayer } from './wmts';
 import type { TileMonitor } from './perf';
 
 const MAX_LAT = 85.051129;
 const PLAY_INTERVAL_MS = 1500;
+const PALETTE = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#9a6324', '#469990', '#808000'];
+const FILL_OPACITY = 0.35;
+type VectorKind = 'fill' | 'line' | 'circle';
+const VECTOR_KINDS: VectorKind[] = ['fill', 'line', 'circle'];
 
 type Encoding = 'REST' | 'KVP';
 
@@ -28,14 +42,43 @@ interface ActiveLayer {
   /** True once a tile loaded successfully with the current settings. */
   loaded: boolean;
   notice?: string;
+  /** Vector tile source layers, in order of discovery. */
+  sourceLayers: string[];
   card?: HTMLElement;
   errorEl?: HTMLElement;
+  sourceLayersEl?: HTMLElement;
 }
 
 export const SOURCE_PREFIX = 'wmts-src-';
 export const LAYER_PREFIX = 'wmts-lyr-';
 const sourceId = (id: string) => `${SOURCE_PREFIX}${id}`;
 const layerId = (id: string) => `${LAYER_PREFIX}${id}`;
+const vectorLayerId = (id: string, index: number, kind: VectorKind) => `${layerId(id)}-${index}-${kind}`;
+/** MapLibre only loads tiles of sources used by a layer, so this empty layer makes source layers discoverable. */
+const probeLayerId = (id: string) => `${layerId(id)}-probe`;
+
+function vectorColor(a: ActiveLayer, index: number): string {
+  return PALETTE[(Number(a.id) - 1 + index) % PALETTE.length];
+}
+
+function opacityPaint(kind: VectorKind | 'raster', opacity: number): Record<string, number> {
+  switch (kind) {
+    case 'raster':
+      return { 'raster-opacity': opacity };
+    case 'fill':
+      return { 'fill-opacity': FILL_OPACITY * opacity };
+    case 'line':
+      return { 'line-opacity': opacity };
+    case 'circle':
+      return { 'circle-opacity': opacity, 'circle-stroke-opacity': opacity };
+  }
+}
+
+const GEOMETRY_TYPES: Record<VectorKind, string[]> = {
+  fill: ['Polygon', 'MultiPolygon'],
+  line: ['LineString', 'MultiLineString', 'Polygon', 'MultiPolygon'],
+  circle: ['Point', 'MultiPoint'],
+};
 
 function clampBbox(b: WmtsLayer['bbox']): [number, number, number, number] | undefined {
   if (!b || b[0] >= b[2] || b[1] >= b[3]) return undefined;
@@ -98,10 +141,17 @@ export class LayerManager {
         throw new Error(`HTTP ${status} for ${url}`);
       }
       a.loaded = true;
-      const data = await res.arrayBuffer();
+      let data = await res.arrayBuffer();
       this.recordTile(a, Number(z), start, ttfb, data.byteLength, res.status);
+      if (a.layer.dataType === 'vector') {
+        data = await gunzipIfNeeded(data);
+        this.discoverSourceLayers(a, mvtLayerNames(data));
+      }
       return { data };
     });
+
+    // Source layers discovered while a new basemap style was loading may be missing.
+    map.on('style.load', () => this.layers.forEach((a) => this.syncVectorLayers(a)));
 
     map.on('error', (e) => {
       const sid = (e as { sourceId?: string }).sourceId;
@@ -165,6 +215,7 @@ export class LayerManager {
       timers: new Set(),
       errors: 0,
       loaded: false,
+      sourceLayers: [...(layer.vectorLayers ?? [])],
     };
     a.format = this.formats(a)[0];
 
@@ -183,11 +234,15 @@ export class LayerManager {
     }
   }
 
+  /** RESTful tile templates usable with the current tile matrix set. */
+  private tileResources(a: ActiveLayer) {
+    return a.layer.resourceUrls.filter(
+      (r) => r.resourceType === 'tile' && (!r.tileMatrixSet || r.tileMatrixSet === a.tms),
+    );
+  }
+
   private formats(a: ActiveLayer): string[] {
-    const list =
-      a.encoding === 'REST'
-        ? a.layer.resourceUrls.filter((r) => r.resourceType === 'tile').map((r) => r.format)
-        : a.layer.formats;
+    const list = a.encoding === 'REST' ? this.tileResources(a).map((r) => r.format) : a.layer.formats;
     const unique = [...new Set(list.filter(Boolean))];
     return unique.length ? unique : ['image/png'];
   }
@@ -203,7 +258,7 @@ export class LayerManager {
     let url: URL;
 
     if (a.encoding === 'REST') {
-      const tiles = a.layer.resourceUrls.filter((r) => r.resourceType === 'tile');
+      const tiles = this.tileResources(a);
       const resource = tiles.find((r) => r.format === a.format) ?? tiles[0];
       if (!resource) return undefined;
       const vars: Record<string, string> = {
@@ -213,12 +268,13 @@ export class LayerManager {
         tilecol: String(x),
         style: a.style,
       };
-      for (const [k, v] of Object.entries(a.dims)) vars[k.toLowerCase()] = v;
+      if (!a.layer.dimensionsAsQuery) for (const [k, v] of Object.entries(a.dims)) vars[k.toLowerCase()] = v;
       const filled = resource.template.replace(/\{([^}]+)\}/g, (m, name: string) => {
         const v = vars[name.toLowerCase()];
         return v === undefined ? m : encodeURIComponent(v).replace(/%3A/gi, ':');
       });
       url = new URL(filled, a.caps.url);
+      if (a.layer.dimensionsAsQuery) for (const [k, v] of Object.entries(a.dims)) if (v) url.searchParams.set(k, v);
     } else {
       url = new URL(a.caps.kvpUrl ?? a.caps.url.split('?')[0], a.caps.url);
       const p = url.searchParams;
@@ -235,9 +291,7 @@ export class LayerManager {
       for (const [k, v] of Object.entries(a.dims)) p.set(k, v);
     }
     a.caps.extraParams.forEach((v, k) => url.searchParams.set(k, v));
-    // Browsers block http requests from https pages; many servers advertise http but also serve https.
-    if (location.protocol === 'https:' && url.protocol === 'http:') url.protocol = 'https:';
-    return url.href;
+    return upgradeToPageProtocol(url).href;
   }
 
   /** Some servers advertise RESTful templates they don't actually serve. */
@@ -250,9 +304,121 @@ export class LayerManager {
     this.rerenderCard(a);
   }
 
+  /** MapLibre layer ids of an entry, bottom to top: all fills, then all lines, then all points. */
+  private mapLayerIds(a: ActiveLayer): string[] {
+    if (a.layer.dataType !== 'vector') return [layerId(a.id)];
+    return [
+      probeLayerId(a.id),
+      ...VECTOR_KINDS.flatMap((kind) => a.sourceLayers.map((_, i) => vectorLayerId(a.id, i, kind))),
+    ];
+  }
+
+  /** The bottom-most MapLibre layer of the nearest entry above, to insert below it. */
   private beforeId(id: string): string | undefined {
-    const i = this.order.indexOf(id);
-    return i > 0 ? layerId(this.order[i - 1]) : undefined;
+    for (let j = this.order.indexOf(id) - 1; j >= 0; j--) {
+      const above = this.mapLayerIds(this.layers.get(this.order[j])!).find((l) => this.map.getLayer(l));
+      if (above) return above;
+    }
+    return undefined;
+  }
+
+  private vectorStyleLayer(a: ActiveLayer, index: number, kind: VectorKind): LayerSpecification {
+    const color = vectorColor(a, index);
+    const filter: FilterSpecification = ['match', ['geometry-type'], GEOMETRY_TYPES[kind], true, false];
+    const common = {
+      id: vectorLayerId(a.id, index, kind),
+      source: sourceId(a.id),
+      'source-layer': a.sourceLayers[index],
+      filter,
+      layout: { visibility: a.visible ? ('visible' as const) : ('none' as const) },
+    };
+    switch (kind) {
+      case 'fill':
+        return { ...common, type: 'fill', paint: { 'fill-color': color, ...opacityPaint(kind, a.opacity) } };
+      case 'line':
+        return { ...common, type: 'line', paint: { 'line-color': color, 'line-width': 1.5, ...opacityPaint(kind, a.opacity) } };
+      case 'circle':
+        return {
+          ...common,
+          type: 'circle',
+          paint: {
+            'circle-color': color,
+            'circle-radius': 4,
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 1,
+            ...opacityPaint(kind, a.opacity),
+          },
+        };
+    }
+  }
+
+  /** Adds style layers for vector tile source layers that are not on the map yet. */
+  private syncVectorLayers(a: ActiveLayer): void {
+    if (a.layer.dataType !== 'vector' || !this.map.getSource(sourceId(a.id))) return;
+    const specs: LayerSpecification[] = [
+      {
+        id: probeLayerId(a.id),
+        type: 'circle',
+        source: sourceId(a.id),
+        'source-layer': '__wmts_explorer_probe__',
+        layout: { visibility: a.visible ? 'visible' : 'none' },
+      },
+      ...VECTOR_KINDS.flatMap((kind) => a.sourceLayers.map((_, i) => this.vectorStyleLayer(a, i, kind))),
+    ];
+    try {
+      specs.forEach((spec, k) => {
+        if (this.map.getLayer(spec.id)) return;
+        const before = specs.slice(k + 1).find((l) => this.map.getLayer(l.id))?.id ?? this.beforeId(a.id);
+        this.map.addLayer(spec, before);
+      });
+    } catch {
+      // The style is being replaced; this runs again on 'style.load'.
+    }
+  }
+
+  private discoverSourceLayers(a: ActiveLayer, names: string[]): void {
+    const added = names.filter((n) => !a.sourceLayers.includes(n));
+    if (!added.length) return;
+    a.sourceLayers.push(...added);
+    this.syncVectorLayers(a);
+    this.renderSourceLayers(a);
+  }
+
+  private renderSourceLayers(a: ActiveLayer): void {
+    a.sourceLayersEl?.replaceChildren(
+      ...(a.sourceLayers.length
+        ? a.sourceLayers.map((name, i) =>
+            el('span', { class: 'badge source-layer' }, el('span', { class: 'swatch', style: `background:${vectorColor(a, i)}` }), name),
+          )
+        : [el('span', { class: 'hint small', text: 'Source layers appear once tiles load.' })]),
+    );
+  }
+
+  private setVisibility(a: ActiveLayer): void {
+    for (const id of this.mapLayerIds(a)) {
+      if (this.map.getLayer(id)) this.map.setLayoutProperty(id, 'visibility', a.visible ? 'visible' : 'none');
+    }
+  }
+
+  private applyOpacity(a: ActiveLayer): void {
+    if (a.layer.dataType !== 'vector') {
+      this.map.setPaintProperty(layerId(a.id), 'raster-opacity', a.opacity);
+      return;
+    }
+    for (const kind of VECTOR_KINDS) {
+      a.sourceLayers.forEach((_, i) => {
+        const id = vectorLayerId(a.id, i, kind);
+        if (!this.map.getLayer(id)) return;
+        for (const [prop, value] of Object.entries(opacityPaint(kind, a.opacity))) {
+          this.map.setPaintProperty(id, prop as Parameters<MlMap['setPaintProperty']>[1], value);
+        }
+      });
+    }
+  }
+
+  private removeFromMap(a: ActiveLayer): void {
+    for (const id of this.mapLayerIds(a)) if (this.map.getLayer(id)) this.map.removeLayer(id);
+    this.map.removeSource(sourceId(a.id));
   }
 
   private addToMap(a: ActiveLayer): void {
@@ -260,21 +426,28 @@ export class LayerManager {
     const zoom = this.zoomRange(a);
     const { providerName, providerSite } = a.caps;
     const site = safeHttpUrl(providerSite);
-    const attribution = providerName
-      ? site
-        ? `<a href="${escapeHtml(site)}" target="_blank" rel="noopener">${escapeHtml(providerName)}</a>`
-        : escapeHtml(providerName)
-      : undefined;
-
-    this.map.addSource(sourceId(a.id), {
-      type: 'raster',
+    const attribution = a.layer.attribution
+      ? escapeHtml(a.layer.attribution)
+      : providerName
+        ? site
+          ? `<a href="${escapeHtml(site)}" target="_blank" rel="noopener">${escapeHtml(providerName)}</a>`
+          : escapeHtml(providerName)
+        : undefined;
+    const source = {
       tiles: [`wmts://${a.id}/${a.rev}/{z}/{x}/{y}`],
-      tileSize: wm.tileSize,
       minzoom: zoom.min,
       maxzoom: zoom.max,
       bounds: clampBbox(a.layer.bbox),
       attribution,
-    });
+    };
+
+    if (a.layer.dataType === 'vector') {
+      // MapLibre requires 512 for vector sources; z/x/y addressing does not depend on it.
+      this.map.addSource(sourceId(a.id), { type: 'vector', ...source });
+      this.syncVectorLayers(a);
+      return;
+    }
+    this.map.addSource(sourceId(a.id), { type: 'raster', tileSize: wm.tileSize, ...source });
     this.map.addLayer(
       {
         id: layerId(a.id),
@@ -296,14 +469,13 @@ export class LayerManager {
   private refresh(a: ActiveLayer): void {
     a.rev++;
     this.resetErrors(a);
-    const src = this.map.getSource<RasterTileSource>(sourceId(a.id));
+    const src = this.map.getSource<RasterTileSource | VectorTileSource>(sourceId(a.id));
     src?.setTiles([`wmts://${a.id}/${a.rev}/{z}/{x}/{y}`]);
   }
 
   /** Recreates the source after a change of the tile grid (tile matrix set). */
   private rebuild(a: ActiveLayer): void {
-    this.map.removeLayer(layerId(a.id));
-    this.map.removeSource(sourceId(a.id));
+    this.removeFromMap(a);
     a.rev++;
     this.resetErrors(a);
     this.addToMap(a);
@@ -313,8 +485,7 @@ export class LayerManager {
     const a = this.layers.get(id);
     if (!a) return;
     a.timers.forEach((t) => clearInterval(t));
-    this.map.removeLayer(layerId(id));
-    this.map.removeSource(sourceId(id));
+    this.removeFromMap(a);
     this.layers.delete(id);
     this.order = this.order.filter((o) => o !== id);
     this.render();
@@ -325,7 +496,8 @@ export class LayerManager {
     const j = i + delta;
     if (i < 0 || j < 0 || j >= this.order.length) return;
     [this.order[i], this.order[j]] = [this.order[j], this.order[i]];
-    this.map.moveLayer(layerId(id), this.beforeId(id));
+    const before = this.beforeId(id);
+    for (const l of this.mapLayerIds(this.layers.get(id)!)) if (this.map.getLayer(l)) this.map.moveLayer(l, before);
     this.render();
   }
 
@@ -389,14 +561,14 @@ export class LayerManager {
         title: 'Show / hide',
         onchange: (e: Event) => {
           a.visible = (e.target as HTMLInputElement).checked;
-          this.map.setLayoutProperty(layerId(a.id), 'visibility', a.visible ? 'visible' : 'none');
+          this.setVisibility(a);
         },
       }),
       el(
         'div',
         { class: 'card-title' },
         el('strong', { text: L.title }),
-        el('small', { text: `${L.identifier} · ${a.caps.title}` }),
+        el('small', { text: [L.identifier, L.dataType === 'vector' ? 'vector tiles' : '', a.caps.title].filter(Boolean).join(' · ') }),
       ),
       el(
         'div',
@@ -416,7 +588,7 @@ export class LayerManager {
       value: String(a.opacity),
       oninput: () => {
         a.opacity = Number(opacity.value);
-        this.map.setPaintProperty(layerId(a.id), 'raster-opacity', a.opacity);
+        this.applyOpacity(a);
       },
     });
 
@@ -424,6 +596,8 @@ export class LayerManager {
     const errorEl = el('p', { class: 'error small', hidden: a.errors === 0 });
     if (a.errors) errorEl.textContent = `${a.errors} tile request(s) failed.`;
     a.errorEl = errorEl;
+    a.sourceLayersEl = L.dataType === 'vector' ? el('div', { class: 'badges source-layers' }) : undefined;
+    this.renderSourceLayers(a);
 
     const card = el(
       'article',
@@ -489,11 +663,15 @@ export class LayerManager {
               a.tms,
               (v) => {
                 a.tms = v;
+                const available = this.formats(a);
+                if (!available.includes(a.format)) a.format = available[0];
                 this.rebuild(a);
+                this.rerenderCard(a);
               },
             ),
           )
         : null,
+      a.sourceLayersEl ? field('Source layers', a.sourceLayersEl) : null,
       ...L.dimensions.map((d) => this.dimensionControl(a, d)),
       L.tileMatrixLimits[a.tms]
         ? el('p', {

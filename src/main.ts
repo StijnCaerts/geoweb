@@ -4,10 +4,19 @@ import * as maplibregl from 'maplibre-gl';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import { BASEMAPS } from './basemaps';
 import { el, safeHttpUrl } from './dom';
+import { fetchChecked } from './http';
 import { LAYER_PREFIX, LayerManager, SOURCE_PREFIX } from './layers';
+import { loadOgcApi } from './ogcapi';
 import { mountMonitorPanel, TileMonitor } from './perf';
 import { loadSavedServices, storeSavedServices, type SavedService } from './saved';
-import { buildCapabilitiesUrl, compatibleMatrixSets, parseCapabilities, type WmtsCapabilities, type WmtsLayer } from './wmts';
+import {
+  buildCapabilitiesUrl,
+  compatibleMatrixSets,
+  isDisplayable,
+  parseCapabilities,
+  type WmtsCapabilities,
+  type WmtsLayer,
+} from './wmts';
 
 const EXAMPLES = [
   {
@@ -20,6 +29,8 @@ const EXAMPLES = [
     label: 'PDOK BRT Achtergrondkaart – Netherlands',
     url: 'https://service.pdok.nl/brt/achtergrondkaart/wmts/v2_0?request=GetCapabilities&service=wmts',
   },
+  { label: 'OGC API – pygeoapi demo (vector tiles)', url: 'https://demo.pygeoapi.io/master' },
+  { label: 'OGC API – ldproxy Daraa (vector tiles)', url: 'https://demo.ldproxy.net/daraa' },
 ];
 const MAX_LIST_ITEMS = 300;
 
@@ -109,41 +120,58 @@ function setStatus(message: string, kind: 'info' | 'ok' | 'error' = 'info') {
 let caps: WmtsCapabilities | undefined;
 let loadToken = 0;
 
+/** URLs that are clearly WMTS skip the OGC API probe. */
+function looksLikeWmts(url: URL): boolean {
+  const keys = [...url.searchParams.keys()].map((k) => k.toLowerCase());
+  return /\.xml$/i.test(url.pathname) || /wmts/i.test(url.pathname) || keys.includes('request') || keys.includes('service');
+}
+
+async function fetchService(input: string, extraParams: URLSearchParams): Promise<WmtsCapabilities> {
+  const wmtsUrl = buildCapabilitiesUrl(input, extraParams);
+  const probeOgc = !looksLikeWmts(new URL(input.trim(), location.href));
+  if (probeOgc) {
+    const ogc = await loadOgcApi(input, extraParams);
+    if (ogc) return ogc;
+  }
+  try {
+    const res = await fetchChecked(wmtsUrl);
+    return parseCapabilities(await res.text(), wmtsUrl, extraParams);
+  } catch (e) {
+    if (!probeOgc) throw e;
+    throw new Error(`${e instanceof Error ? e.message : String(e)} (Tried both OGC API – Tiles and WMTS.)`);
+  }
+}
+
 async function loadService(input: string, extra: string) {
   const token = ++loadToken;
   const extraParams = new URLSearchParams(extra.trim().replace(/^[?&]/, ''));
-  let url: string;
   try {
-    url = buildCapabilitiesUrl(input, extraParams);
+    buildCapabilitiesUrl(input, extraParams);
   } catch {
     setStatus('Please enter a valid URL.', 'error');
     return;
   }
-  const mixedContent = location.protocol === 'https:' && url.startsWith('http:');
 
-  setStatus('Loading capabilities…');
+  setStatus('Loading service…');
   loadBtn.disabled = true;
   try {
-    let res: Response;
-    try {
-      res = await fetch(url);
-    } catch {
-      throw new Error(
-        mixedContent
-          ? 'The browser blocked this http:// URL because this page is served over https://. Use an https:// service URL.'
-          : 'Could not reach the service. Check the URL, and note that the server must allow cross-origin requests (CORS).',
-      );
-    }
-    if (!res.ok) throw new Error(`The server responded with HTTP ${res.status} ${res.statusText}.`);
-    const parsed = parseCapabilities(await res.text(), url, extraParams);
+    const parsed = await fetchService(input, extraParams);
     if (token !== loadToken) return;
 
     caps = parsed;
-    const compatible = parsed.layers.filter((l) => compatibleMatrixSets(parsed, l).length).length;
-    setStatus(
-      `Loaded ${parsed.layers.length} layers, ${compatible} of which can be displayed in Web Mercator.`,
-      compatible ? 'ok' : 'error',
-    );
+    if (parsed.kind === 'WMTS') {
+      const compatible = parsed.layers.filter((l) => compatibleMatrixSets(parsed, l).length).length;
+      setStatus(
+        `Loaded ${parsed.layers.length} layers, ${compatible} of which can be displayed in Web Mercator.`,
+        compatible ? 'ok' : 'error',
+      );
+    } else {
+      const vector = parsed.layers.filter((l) => l.dataType === 'vector').length;
+      setStatus(
+        `Loaded ${parsed.layers.length} tiled layers from OGC API – Tiles (${parsed.layers.length - vector} map, ${vector} vector).`,
+        'ok',
+      );
+    }
     renderServiceInfo(parsed);
     filterInput.value = '';
     renderCatalog();
@@ -162,6 +190,7 @@ function renderServiceInfo(c: WmtsCapabilities) {
   serviceInfo.replaceChildren(
     ...[
       el('h2', { text: c.title }),
+      el('p', { class: 'small hint', text: c.kind }),
       c.providerName
         ? el(
             'p',
@@ -177,12 +206,13 @@ function renderServiceInfo(c: WmtsCapabilities) {
 }
 
 function layerItem(c: WmtsCapabilities, l: WmtsLayer): HTMLLIElement {
-  const sets = compatibleMatrixSets(c, l);
-  const ok = sets.length > 0;
+  const ok = isDisplayable(c, l);
   const reason = ok
     ? undefined
-    : `No Web Mercator compatible tile matrix set. Available: ${l.tileMatrixSets.join(', ') || 'none'}`;
-  return el(
+    : (l.unavailableReason ??
+      `No Web Mercator compatible tile matrix set. Available: ${l.tileMatrixSets.join(', ') || 'none'}`);
+  const badges = [...(c.kind === 'WMTS' ? [] : [l.dataType === 'vector' ? 'vector tiles' : 'map tiles']), ...l.dimensions.map((d) => d.identifier)];
+  const item: HTMLLIElement = el(
     'li',
     { class: ok ? 'layer-item' : 'layer-item disabled', title: reason ?? l.abstract?.slice(0, 400) ?? '' },
     el(
@@ -190,20 +220,35 @@ function layerItem(c: WmtsCapabilities, l: WmtsLayer): HTMLLIElement {
       { class: 'layer-info' },
       el('strong', { text: l.title }),
       el('small', { text: l.identifier }),
-      l.dimensions.length
-        ? el('div', { class: 'badges' }, ...l.dimensions.map((d) => el('span', { class: 'badge', text: d.identifier })))
-        : null,
+      badges.length ? el('div', { class: 'badges' }, ...badges.map((b) => el('span', { class: 'badge', text: b }))) : null,
+      !ok && l.unavailableReason ? el('small', { class: 'error', text: l.unavailableReason }) : null,
     ),
     el('button', {
       type: 'button',
       text: 'Add',
       disabled: !ok,
-      onclick: async () => {
+      onclick: async (e: Event) => {
+        if (l.resolve) {
+          const btn = e.currentTarget as HTMLButtonElement;
+          btn.disabled = true;
+          btn.textContent = 'Loading…';
+          try {
+            await l.resolve();
+          } catch (err) {
+            setStatus(`Could not load the tile sets of "${l.title}": ${err instanceof Error ? err.message : err}`, 'error');
+            btn.disabled = false;
+            btn.textContent = 'Add';
+            return;
+          }
+          item.replaceWith(layerItem(c, l));
+          if (!compatibleMatrixSets(c, l).length) return;
+        }
         await mapReady;
         layers.add(c, l);
       },
     }),
   );
+  return item;
 }
 
 function renderCatalog() {
@@ -212,7 +257,7 @@ function renderCatalog() {
   const q = filterInput.value.trim().toLowerCase();
   const matches = c.layers.filter(
     (l) =>
-      (!onlyCompatible.checked || compatibleMatrixSets(c, l).length > 0) &&
+      (!onlyCompatible.checked || isDisplayable(c, l)) &&
       (!q || l.title.toLowerCase().includes(q) || l.identifier.toLowerCase().includes(q)),
   );
   layerCount.textContent = `(${matches.length} of ${c.layers.length})`;

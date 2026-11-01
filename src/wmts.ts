@@ -23,6 +23,8 @@ export interface WmtsResourceUrl {
   format: string;
   resourceType: string;
   template: string;
+  /** Restricts the template to one tile matrix set (OGC API templates are per tile set). */
+  tileMatrixSet?: string;
 }
 
 export interface WmtsTileMatrixLimits {
@@ -44,7 +46,22 @@ export interface WmtsLayer {
   /** Per tile matrix set, the tile ranges per TileMatrix identifier (when declared). */
   tileMatrixLimits: Record<string, Map<string, WmtsTileMatrixLimits>>;
   resourceUrls: WmtsResourceUrl[];
+  /** 'vector' for Mapbox Vector Tiles, rendered with a generated style. */
+  dataType: TileDataType;
+  /** Plain text attribution of the layer itself, shown instead of the service provider. */
+  attribution?: string;
+  /** Known vector tile source layer names; more are discovered from the tiles. */
+  vectorLayers?: string[];
+  /** Send dimension values as query parameters instead of filling template variables (OGC API `datetime`). */
+  dimensionsAsQuery?: boolean;
+  /** Present until the tile sets are fetched on demand (OGC API); resolves once the layer is complete. */
+  resolve?: () => Promise<void>;
+  /** Why the layer cannot be displayed, when known. */
+  unavailableReason?: string;
 }
+
+export type TileDataType = 'map' | 'vector';
+export type ServiceKind = 'WMTS' | 'OGC API – Tiles';
 
 export interface WmtsTileMatrix {
   identifier: string;
@@ -70,6 +87,7 @@ export interface WmtsTileMatrixSet {
 }
 
 export interface WmtsCapabilities {
+  kind: ServiceKind;
   url: string;
   extraParams: URLSearchParams;
   title: string;
@@ -145,6 +163,7 @@ export function parseCapabilities(xml: string, url: string, extraParams: URLSear
   }
 
   return {
+    kind: 'WMTS',
     url,
     extraParams,
     title: txt(si, 'Title') ?? 'Untitled WMTS service',
@@ -211,6 +230,7 @@ function parseLayer(l: Element): WmtsLayer {
       resourceType: r.getAttribute('resourceType') ?? '',
       template: r.getAttribute('template') ?? '',
     })),
+    dataType: 'map',
   };
 }
 
@@ -258,7 +278,7 @@ function parseTileMatrixSet(tms: Element): WmtsTileMatrixSet {
  * MapLibre only renders Web Mercator XYZ tiles. A tile matrix matches zoom level z when its
  * origin is the top-left corner of the Web Mercator world and one tile spans WORLD_SIZE / 2^z.
  */
-function toWebMercator(matrices: WmtsTileMatrix[]): WebMercatorInfo | null {
+export function toWebMercator(matrices: WmtsTileMatrix[]): WebMercatorInfo | null {
   const zoomToMatrix = new Map<number, string>();
   let tileSize: number | undefined;
   for (const m of matrices) {
@@ -274,6 +294,11 @@ function toWebMercator(matrices: WmtsTileMatrix[]): WebMercatorInfo | null {
   if (!zoomToMatrix.size || tileSize === undefined) return null;
   const zooms = [...zoomToMatrix.keys()];
   return { zoomToMatrix, minZoom: Math.min(...zooms), maxZoom: Math.max(...zooms), tileSize };
+}
+
+/** Layers whose tile sets have not been fetched yet are assumed to be displayable. */
+export function isDisplayable(caps: WmtsCapabilities, layer: WmtsLayer): boolean {
+  return !!layer.resolve || compatibleMatrixSets(caps, layer).length > 0;
 }
 
 export function compatibleMatrixSets(caps: WmtsCapabilities, layer: WmtsLayer): WmtsTileMatrixSet[] {

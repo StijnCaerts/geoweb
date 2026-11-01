@@ -308,12 +308,32 @@ details p {
   margin-top: 3px;
 }
 
+.layer-info small.error {
+  color: var(--error);
+  white-space: normal;
+}
+
 .badge {
   font-size: 0.75rem;
   background: #e0e7ff;
   color: #3730a3;
   border-radius: 10px;
   padding: 0 7px;
+}
+
+.badge.source-layer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f1f5f9;
+  color: var(--text);
+}
+
+.swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
 }
 
 .card {
